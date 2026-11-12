@@ -37,112 +37,35 @@ def embedding_GF_l2reg(graph, d, max_iter=10000, eta=0.1, regu=0.1):
     return X, eig_err
 
 
-def get_reconstructed_adj(X):
-    """Compute the adjacency matrix from the learned embedding"""
-    node_num = X.shape[0]
-    adj_mtx_r = np.zeros((node_num, node_num))
-    for v_i in range(node_num):
-        for v_j in range(node_num):
-            if v_i == v_j:
-                continue
-            adj_mtx_r[v_i, v_j] = get_edge_weight(X, v_i, v_j)
-    return adj_mtx_r
 
 
-def get_edge_weight(X, i, j):
-    return np.dot(X[i], X[j]) / (np.linalg.norm(X[i]) * np.linalg.norm(X[j]) + 1e-8)
+def cosine_similarity_matrix(X, eps=1e-12):
+    """S_ij = <x_i, x_j> / (||x_i|| ||x_j||)   (rows of X = node embeddings)"""
+    Xn = X / (np.linalg.norm(X, axis=1, keepdims=True) + eps)   # unit-length rows
+    return Xn @ Xn.T                                            # n x n, values in [-1, 1]
 
 
-def get_edge_list_from_adj_mtrx(adj, threshold=0.0, is_undirected=True, edge_pairs=None):
-    result = []
-    node_num = adj.shape[0]
-    if edge_pairs:
-        for (st, ed) in edge_pairs:
-            if adj[st, ed] >= threshold:
-                result.append((st, ed, adj[st, ed]))
-    else:
-        for i in range(node_num):
-            for j in range(node_num):
-                if j == i:
-                    continue
-                if is_undirected and i >= j:
-                    continue
-                if adj[i, j] > threshold:
-                    result.append((i, j, adj[i, j]))
-    return result
-
-
-def computePrecisionCurve_onlyfor_undirected_graph(predicted_edge_list, true_graph, max_k=-1):
-    """Compute precision scores for undirected graph link prediction."""
-    if max_k == -1:
-        max_k = len(predicted_edge_list)
-    else:
-        max_k = min(max_k, len(predicted_edge_list))
-    
-    sorted_edges = sorted(predicted_edge_list, key=lambda x: x[2], reverse=True)
-    
-    precision_scores = []
-    delta_factors = []
-    correct_edge = 0
-    
-    for i in range(max_k):
-        node1, node2 = sorted_edges[i][0], sorted_edges[i][1]
-        
-        if true_graph.has_edge(node1, node2):
-            correct_edge += 1
-            delta_factors.append(1.0)
-        else:
-            delta_factors.append(0.0)
-        
-        precision_scores.append(1.0 * correct_edge / (i + 1))
-    
-    return precision_scores, delta_factors
-
-
-def computeMAP_onlyfor_undirected_graphs(predicted_edge_list, true_graph, max_k=-1):
-    """Compute Mean Average Precision (MAP) for undirected graph link prediction."""
-    node_list = list(true_graph.nodes())
-    node_num = len(node_list)
-    
-    node_to_idx = {node: idx for idx, node in enumerate(node_list)}
-    node_edges = [[] for _ in range(node_num)]
-    
-    edge_dict = {}
-    for (st, ed, w) in predicted_edge_list:
-        edge_key = tuple(sorted([st, ed]))
-        if edge_key not in edge_dict or w > edge_dict[edge_key]:
-            edge_dict[edge_key] = w
-    
-    for (node1, node2), w in edge_dict.items():
-        if node1 in node_to_idx and node2 in node_to_idx:
-            idx1, idx2 = node_to_idx[node1], node_to_idx[node2]
-            node_edges[idx1].append((node1, node2, w))
-            node_edges[idx2].append((node2, node1, w))
-    
-    node_ap = [0.0] * node_num
-    count = 0
-    
-    for idx, node in enumerate(node_list):
-        if true_graph.degree(node) == 0:
-            continue
-        
-        count += 1
-        node_edges[idx].sort(key=lambda x: x[2], reverse=True)
-        
-        precision_scores, delta_factors = computePrecisionCurve_onlyfor_undirected_graph(
-            node_edges[idx], true_graph, max_k)
-        
-        if sum(delta_factors) == 0:
-            node_ap[idx] = 0
-        else:
-            precision_rectified = [p * d for p, d in zip(precision_scores, delta_factors)]
-            node_ap[idx] = float(sum(precision_rectified) / sum(delta_factors))
-    
-    return sum(node_ap) / count if count > 0 else 0
+def MAP(G, X):
+    """Mean Average Precision of reconstructing the edges of G.
+    For every node a: rank all other nodes b by cosine(x_a, x_b), walk down the
+    list, and average the precision at each position where (a, b) is a true edge."""
+    nodes = sorted(G)                       # rows of X follow this order
+    A = nx.to_numpy_array(G, nodelist=nodes)
+    S = cosine_similarity_matrix(X)
+    aps = []
+    for a in range(len(nodes)):
+        hits, s = 0, 0.0
+        ranked = [b for b in np.argsort(-S[a], kind="stable") if b != a]   # deterministic order for ties (d=1: cosine is only +1/-1)
+        for r, b in enumerate(ranked, 1):
+            if A[a, b]:
+                hits += 1
+                s += hits / r
+        aps.append(s / hits)
+    return float(np.mean(aps))
 
 
 def my_graph():
-    """Create the test graph with communities."""
+    # Initialize an empty graph
     G = nx.Graph()
 
     # Create complete graph with 7 nodes (labeled 1 to 7)
@@ -152,10 +75,11 @@ def my_graph():
         for j in nodes_7:
             if i < j:
                 G.add_edge(i, j)
-    G.remove_edge(7, 6)
-    G.remove_edge(5, 6)
-    G.remove_edge(3, 5)
-    G.remove_edge(3, 4)
+
+    G.remove_edge(7,6)
+    G.remove_edge(5,6)
+    G.remove_edge(3,5)
+    G.remove_edge(3,4)
 
     # Create complete graph with 8 nodes (labeled 8 to 15)
     nodes_8 = range(8, 16)
@@ -164,12 +88,13 @@ def my_graph():
         for j in nodes_8:
             if i < j:
                 G.add_edge(i, j)
-    G.remove_edge(8, 9)
-    G.remove_edge(8, 10)
-    G.remove_edge(8, 15)
-    G.remove_edge(9, 14)
-    G.remove_edge(9, 15)
-    G.remove_edge(9, 11)
+
+    G.remove_edge(8,9)
+    G.remove_edge(8,10)
+    G.remove_edge(8,15)
+    G.remove_edge(9,14)
+    G.remove_edge(9,15)
+    G.remove_edge(9,11)
 
     # Create complete graph with 9 nodes (labeled 17 to 25)
     nodes_9 = range(17, 26)
@@ -178,32 +103,37 @@ def my_graph():
         for j in nodes_9:
             if i < j:
                 G.add_edge(i, j)
-    G.remove_edge(18, 19)
-    G.remove_edge(18, 20)
-    G.remove_edge(18, 25)
-    G.remove_edge(19, 24)
-    G.remove_edge(19, 25)
-    G.remove_edge(19, 21)
-    G.remove_edge(21, 24)
-    G.remove_edge(21, 25)
-    G.remove_edge(22, 24)
+
+
+    G.remove_edge(18,19)
+    G.remove_edge(18,20)
+    G.remove_edge(18,25)
+    G.remove_edge(19,24)
+    G.remove_edge(19,25)
+    G.remove_edge(19,21)
+    G.remove_edge(21,24)
+    G.remove_edge(21,25)
+    G.remove_edge(22,24)
+
 
     # Add 8 solitary nodes (labeled 27 to 34)
     solitary_nodes = range(27, 35)
     G.add_nodes_from(solitary_nodes)
 
-    G.add_edge(1, 27)
-    G.add_edge(27, 28)
-    G.add_edge(28, 29)
-    G.add_edge(29, 8)
-    G.add_edge(30, 34)
-    G.add_edge(34, 17)
-    G.add_edge(31, 32)
-    G.add_edge(31, 19)
-    G.add_edge(30, 10)
-    G.add_edge(22, 33)
-    G.add_edge(7, 33)
-    return G
+
+    G.add_edge(1,27)
+    G.add_edge(27,28)
+    G.add_edge(28,29)
+    G.add_edge(29,8)
+    G.add_edge(30,34)
+    G.add_edge(34,17)
+    G.add_edge(31,32)
+    G.add_edge(31,19)
+    G.add_edge(30,10)
+    G.add_edge(22,33)
+    G.add_edge(7,33)
+    return G 
+
 
 
 def plot_tsne_embedding(G, X_d4, X_d7, title="t-SNE Visualization", 
@@ -333,15 +263,20 @@ def run_multiple_trials(num_runs=6, max_d=20, max_iter=10000, eta=0.1, regu=0.1)
         run_maps = []
         run_errors = []
         
-        for d in range(2, max_d):
-            X, error = embedding_GF_l2reg(G, d, max_iter=max_iter, eta=eta, regu=regu)
-            rec_adj = get_reconstructed_adj(X)
-            predicted_edge_list = get_edge_list_from_adj_mtrx(rec_adj)
-            map_score = computeMAP_onlyfor_undirected_graphs(predicted_edge_list, G)
-            run_maps.append(map_score)
-            run_errors.append(error)
-            print(f"d={d}, map_score={round(map_score, 2)}, error={error:.4f}")
+        # for d in range(2, max_d):
+        #     X, error = embedding_GF_l2reg(G, d, max_iter=max_iter, eta=eta, regu=regu)
+        #     rec_adj = get_reconstructed_adj(X)
+        #     predicted_edge_list = get_edge_list_from_adj_mtrx(rec_adj)
+        #     map_score = computeMAP_onlyfor_undirected_graphs(predicted_edge_list, G)
+        #     run_maps.append(map_score)
+        #     run_errors.append(error)
+        #     print(f"d={d}, map_score={round(map_score, 2)}, error={error:.4f}")
         
+
+        run_maps = [MAP(G, embedding_LAP(G, d)[0]) for d in range(1,max_d)]
+        run_errors = [MAP(G, embedding_LAP(G, d)[1]) for d in range(1,max_d)]
+
+
         all_maps.append(run_maps)
         all_errors.append(run_errors)
     
